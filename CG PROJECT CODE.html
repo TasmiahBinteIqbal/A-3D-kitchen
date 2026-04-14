@@ -1,0 +1,1290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Kitchen - Computer Graphics Lab</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+  canvas { display: block; }
+  #ui {
+    position: fixed; top: 15px; left: 15px; z-index: 100;
+    background: rgba(0,0,0,0.75); border: 1px solid #555;
+    border-radius: 8px; padding: 14px 18px; color: #e0e0e0;
+    font-size: 13px; line-height: 1.9; max-width: 270px;
+    backdrop-filter: blur(6px);
+  }
+  #ui h3 { color: #ffcc66; margin-bottom: 6px; font-size: 14px; letter-spacing: 1px; }
+  #ui .key { display: inline-block; background: #333; border: 1px solid #666;
+    border-radius: 3px; padding: 1px 6px; font-size: 11px; color: #fff; }
+  #status {
+    position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.75); border: 1px solid #555; border-radius: 20px;
+    padding: 7px 20px; color: #ffcc66; font-size: 13px; z-index: 100;
+    backdrop-filter: blur(6px); transition: opacity 0.5s;
+  }
+</style>
+</head>
+<body>
+<div id="ui">
+  <h3>🍳 3D KITCHEN</h3>
+  <b>Camera Movement:</b><br>
+  <span class="key">W</span> Forward &nbsp;
+  <span class="key">S</span> Backward<br>
+  <span class="key">A</span> Left &nbsp;&nbsp;&nbsp;
+  <span class="key">D</span> Right<br>
+  <span class="key">Q</span> Up &nbsp;&nbsp;&nbsp;&nbsp;
+  <span class="key">E</span> Down<br>
+  <span class="key">←→↑↓</span> Rotate Camera<br><br>
+  <b>Mouse Interaction:</b><br>
+  Click refrigerator door to open/close<br><br>
+  <b>Animation:</b><br>
+  Steam rises from the stove burners<br>
+  Lid bobs on the pot<br><br>
+  <b>Additional Features:</b><br>
+  &#x23F0; Real-time wall clock<br>
+  &#x1F307; Animated sky window<br>
+  &#x1FAE7; Soap bubbles from sink<br>
+  &#x1F4A1; <span class="key">L</span> or click switch → lights
+</div>
+<div id="status">Click the Refrigerator Door to Open/Close</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ─────────────────────────────────────────────
+//  SCENE SETUP
+// ─────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87CEEB);
+scene.fog = new THREE.Fog(0x87CEEB, 15, 40);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputEncoding = THREE.sRGBEncoding;
+document.body.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 2.5, 7);
+camera.lookAt(0, 1.5, 0);
+
+// ─────────────────────────────────────────────
+//  CUSTOM SHADERS
+// ─────────────────────────────────────────────
+
+// 1. Wood Floor Shader
+const woodVertexShader = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vUv = uv;
+    vNormal = normalize(normalMatrix * normal);
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPos = worldPos.xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const woodFragmentShader = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  uniform vec3 lightPos;
+  uniform float time;
+
+  float rand(vec2 co) {
+    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+  float noise(vec2 p) {
+    vec2 i = floor(p); vec2 f = fract(p);
+    float a = rand(i), b = rand(i+vec2(1,0)), c = rand(i+vec2(0,1)), d = rand(i+vec2(1,1));
+    vec2 u = f*f*(3.0-2.0*f);
+    return mix(a,b,u.x) + (c-a)*u.y*(1.0-u.x) + (d-b)*u.x*u.y;
+  }
+
+  void main() {
+    vec2 uv = vUv * vec2(12.0, 1.5);
+    float grain = noise(uv * 8.0) * 0.15;
+    float plankLine = step(0.95, fract(uv.x));
+    vec3 baseWood = mix(vec3(0.65, 0.42, 0.22), vec3(0.78, 0.55, 0.30), noise(uv * 3.0));
+    baseWood += grain;
+    baseWood = mix(baseWood, vec3(0.3, 0.18, 0.08), plankLine * 0.5);
+
+    vec3 lightDir = normalize(lightPos - vWorldPos);
+    float diff = max(dot(vNormal, lightDir), 0.0);
+    float ambient = 0.35;
+    vec3 col = baseWood * (ambient + diff * 0.65);
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+// 2. Steam Particle Shader
+const steamVertexShader = `
+  attribute float aSize;
+  attribute float aAlpha;
+  varying float vAlpha;
+  uniform float time;
+  void main() {
+    vAlpha = aAlpha;
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize * (250.0 / -mvPosition.z);
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+const steamFragmentShader = `
+  varying float vAlpha;
+  void main() {
+    vec2 uv = gl_PointCoord - 0.5;
+    float d = length(uv);
+    if (d > 0.5) discard;
+    float alpha = (1.0 - d * 2.0) * vAlpha;
+    gl_FragColor = vec4(0.95, 0.95, 0.98, alpha * 0.55);
+  }
+`;
+
+// 3. Wall Tile Shader
+const tileVertexShader = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vUv = uv;
+    vNormal = normalize(normalMatrix * normal);
+    vWorldPos = (modelMatrix * vec4(position,1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+  }
+`;
+const tileFragmentShader = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  uniform vec3 lightPos;
+  void main() {
+    vec2 uv = vUv * 10.0;
+    vec2 grid = fract(uv);
+    float grout = step(0.93, grid.x) + step(0.93, grid.y);
+    grout = clamp(grout, 0.0, 1.0);
+    vec3 tileColor = vec3(0.92, 0.90, 0.85);
+    vec3 groutColor = vec3(0.65, 0.63, 0.60);
+    vec3 base = mix(tileColor, groutColor, grout);
+
+    // Checkerboard accent
+    vec2 checker = floor(uv);
+    float check = mod(checker.x + checker.y, 2.0);
+    base = mix(base, base * 0.95 + vec3(0.02, 0.04, 0.06) * check, 0.3);
+
+    vec3 lightDir = normalize(lightPos - vWorldPos);
+    float diff = max(dot(vNormal, lightDir), 0.0);
+    float spec = pow(max(dot(reflect(-lightDir, vNormal), normalize(-vWorldPos)), 0.0), 32.0);
+    vec3 col = base * (0.4 + diff * 0.6) + vec3(1.0) * spec * 0.15;
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+// 4. Refrigerator Metal Shader
+const metalVertexShader = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vUv = uv;
+    vNormal = normalize(normalMatrix * normal);
+    vWorldPos = (modelMatrix * vec4(position,1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+  }
+`;
+const metalFragmentShader = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  uniform vec3 lightPos;
+  uniform vec3 baseColor;
+
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float noise(vec2 p) {
+    vec2 i = floor(p); vec2 f = fract(p);
+    float a=hash(i),b=hash(i+vec2(1,0)),c=hash(i+vec2(0,1)),d=hash(i+vec2(1,1));
+    vec2 u=f*f*(3.0-2.0*f);
+    return mix(mix(a,b,u.x),mix(c,d,u.x),u.y);
+  }
+
+  void main() {
+    vec3 lightDir = normalize(lightPos - vWorldPos);
+    vec3 viewDir = normalize(cameraPosition - vWorldPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
+
+    float diff = max(dot(vNormal, lightDir), 0.0);
+    float spec = pow(max(dot(vNormal, halfDir), 0.0), 64.0);
+    float scratch = noise(vUv * 40.0) * 0.04;
+    float ambient = 0.4;
+
+    vec3 col = baseColor * (ambient + diff * 0.6) + vec3(1.0) * spec * 0.4 + scratch;
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+// 5. Stove Surface Shader
+const stoveVertexShader = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vUv = uv;
+    vNormal = normalize(normalMatrix * normal);
+    vWorldPos = (modelMatrix * vec4(position,1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+  }
+`;
+const stoveFragmentShader = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  uniform vec3 lightPos;
+  uniform float time;
+
+  void main() {
+    vec3 lightDir = normalize(lightPos - vWorldPos);
+    vec3 viewDir = normalize(cameraPosition - vWorldPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
+
+    // Burner rings on top face (y-normal)
+    vec2 centered = vUv - 0.5;
+    float r = length(centered);
+
+    // 4 burner positions
+    vec2 burnerPos[4];
+    burnerPos[0] = vec2(-0.25, -0.22);
+    burnerPos[1] = vec2( 0.25, -0.22);
+    burnerPos[2] = vec2(-0.25,  0.22);
+    burnerPos[3] = vec2( 0.25,  0.22);
+
+    float burner = 0.0;
+    for (int i = 0; i < 4; i++) {
+      vec2 d = centered - burnerPos[i];
+      float dr = length(d);
+      float ring = smoothstep(0.06, 0.07, dr) * (1.0 - smoothstep(0.09, 0.10, dr));
+      float ring2 = smoothstep(0.03, 0.04, dr) * (1.0 - smoothstep(0.06, 0.065, dr));
+      burner += ring * 0.6 + ring2 * 0.4;
+    }
+
+    float diff = max(dot(vNormal, lightDir), 0.0);
+    float spec = pow(max(dot(vNormal, halfDir), 0.0), 48.0);
+
+    vec3 base = vec3(0.18, 0.18, 0.18);
+    base = mix(base, vec3(0.06, 0.06, 0.06), burner);
+    vec3 col = base * (0.4 + diff * 0.6) + vec3(1.0) * spec * 0.3;
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+// ─────────────────────────────────────────────
+//  TEXTURE GENERATORS (Canvas-based)
+// ─────────────────────────────────────────────
+function makeTexture(drawFn, w=256, h=256) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  drawFn(ctx, w, h);
+  const tex = new THREE.CanvasTexture(canvas);
+  return tex;
+}
+
+// Refrigerator label texture
+const fridgeLabelTex = makeTexture((ctx, w, h) => {
+  ctx.fillStyle = '#dce8f5';
+  ctx.fillRect(0, 0, w, h);
+  // Brand logo area
+  ctx.fillStyle = '#1a5fa8';
+  ctx.fillRect(20, 20, w - 40, 50);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 28px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('ARCTIC PRO', w/2, 54);
+  // Decorative lines
+  ctx.strokeStyle = '#b0c8e0';
+  ctx.lineWidth = 2;
+  for (let y = 90; y < h; y += 20) {
+    ctx.beginPath(); ctx.moveTo(20, y); ctx.lineTo(w-20, y); ctx.stroke();
+  }
+  ctx.fillStyle = '#7a9ab8';
+  ctx.font = '14px Arial';
+  ctx.fillText('No Frost   500L', w/2, 110);
+});
+
+// Stove front panel texture
+const stovePanelTex = makeTexture((ctx, w, h) => {
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, '#2a2a2a');
+  grad.addColorStop(1, '#1a1a1a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+  // Control panel strip
+  ctx.fillStyle = '#333';
+  ctx.fillRect(0, 0, w, 50);
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0, 0, w, 50);
+  // Knob circles
+  const knobX = [48, 112, 176, 240];
+  knobX.forEach(x => {
+    ctx.beginPath();
+    ctx.arc(x, 26, 16, 0, Math.PI * 2);
+    ctx.fillStyle = '#444';
+    ctx.fill();
+    ctx.strokeStyle = '#666';
+    ctx.stroke();
+    // Knob marker
+    ctx.beginPath();
+    ctx.moveTo(x, 10); ctx.lineTo(x, 20);
+    ctx.strokeStyle = '#ff8844';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  });
+  // Oven door
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(30, 60, w - 60, h - 80);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(32, 62, w - 64, h - 84);
+  // Oven window
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(50, 75, w - 100, 80);
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(50, 75, w - 100, 80);
+  ctx.fillStyle = '#888';
+  ctx.font = '12px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('OVEN', w/2, 220);
+});
+
+// Ceiling/wall texture
+const ceilingTex = makeTexture((ctx, w, h) => {
+  ctx.fillStyle = '#f0ece4';
+  ctx.fillRect(0, 0, w, h);
+  for (let i = 0; i < 200; i++) {
+    const x = Math.random() * w, y = Math.random() * h;
+    ctx.fillStyle = `rgba(${100+Math.random()*60},${90+Math.random()*50},${70+Math.random()*40},0.05)`;
+    ctx.fillRect(x, y, 2+Math.random()*4, 2+Math.random()*4);
+  }
+});
+
+// Counter top texture
+const counterTex = makeTexture((ctx, w, h) => {
+  ctx.fillStyle = '#e8e0d0';
+  ctx.fillRect(0, 0, w, h);
+  // Marble veins
+  ctx.strokeStyle = 'rgba(180,165,145,0.6)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 8; i++) {
+    ctx.beginPath();
+    ctx.moveTo(Math.random()*w, 0);
+    let x = Math.random()*w;
+    for (let y = 0; y < h; y += 10) {
+      x += (Math.random()-0.5)*20;
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+});
+
+// ─────────────────────────────────────────────
+//  LIGHT SETUP
+// ─────────────────────────────────────────────
+const lightPos = new THREE.Vector3(2, 5, 3);
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xfffde8, 0.9);
+sunLight.position.copy(lightPos);
+sunLight.castShadow = true;
+sunLight.shadow.camera.near = 0.1;
+sunLight.shadow.camera.far = 30;
+sunLight.shadow.camera.left = -10;
+sunLight.shadow.camera.right = 10;
+sunLight.shadow.camera.top = 10;
+sunLight.shadow.camera.bottom = -10;
+sunLight.shadow.mapSize.width = 2048;
+sunLight.shadow.mapSize.height = 2048;
+scene.add(sunLight);
+
+const fillLight = new THREE.PointLight(0xffd5b0, 0.6, 20);
+fillLight.position.set(-3, 3, -1);
+scene.add(fillLight);
+
+const kitchenLight = new THREE.PointLight(0xfff5e0, 0.8, 12);
+kitchenLight.position.set(0, 4.5, 0);
+scene.add(kitchenLight);
+
+// ─────────────────────────────────────────────
+//  ROOM CONSTRUCTION
+// ─────────────────────────────────────────────
+const woodMat = new THREE.ShaderMaterial({
+  uniforms: { lightPos: { value: lightPos }, time: { value: 0 } },
+  vertexShader: woodVertexShader,
+  fragmentShader: woodFragmentShader
+});
+
+const tileMat = new THREE.ShaderMaterial({
+  uniforms: { lightPos: { value: lightPos } },
+  vertexShader: tileVertexShader,
+  fragmentShader: tileFragmentShader
+});
+
+// Floor
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(14, 14, 1, 1), woodMat);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// Ceiling
+const ceilMat = new THREE.MeshLambertMaterial({ map: ceilingTex });
+const ceil = new THREE.Mesh(new THREE.PlaneGeometry(14, 14), ceilMat);
+ceil.rotation.x = Math.PI / 2;
+ceil.position.y = 5;
+scene.add(ceil);
+
+// Back wall (tiled)
+const backWall = new THREE.Mesh(new THREE.PlaneGeometry(14, 5), tileMat);
+backWall.position.set(0, 2.5, -5);
+backWall.receiveShadow = true;
+scene.add(backWall);
+
+// Left wall
+const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(14, 5), tileMat);
+leftWall.rotation.y = Math.PI / 2;
+leftWall.position.set(-7, 2.5, 0);
+leftWall.receiveShadow = true;
+scene.add(leftWall);
+
+// Right wall
+const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(14, 5), tileMat);
+rightWall.rotation.y = -Math.PI / 2;
+rightWall.position.set(7, 2.5, 0);
+rightWall.receiveShadow = true;
+scene.add(rightWall);
+
+// Counter / cabinet base
+const counterMat = new THREE.MeshStandardMaterial({ map: counterTex, roughness: 0.4, metalness: 0.1 });
+const cabinetMat = new THREE.MeshLambertMaterial({ color: 0xd4c4a0 });
+
+function makeBox(w, h, d, mat, x, y, z, shadow=true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  if (shadow) { m.castShadow = true; m.receiveShadow = true; }
+  scene.add(m);
+  return m;
+}
+
+// Counter top back
+makeBox(10, 0.12, 1.0, counterMat, 0, 1.0, -4.5);
+// Cabinet under counter
+makeBox(10, 1.0, 1.0, cabinetMat, 0, 0.5, -4.5);
+
+// ─────────────────────────────────────────────
+//  REFRIGERATOR
+// ─────────────────────────────────────────────
+const fridgeGroup = new THREE.Group();
+fridgeGroup.position.set(-3.5, 0, -4.1);
+scene.add(fridgeGroup);
+
+const fridgeBodyMat = new THREE.ShaderMaterial({
+  uniforms: { lightPos: { value: lightPos }, baseColor: { value: new THREE.Vector3(0.88, 0.90, 0.92) } },
+  vertexShader: metalVertexShader,
+  fragmentShader: metalFragmentShader
+});
+
+// Body
+const fridgeBody = new THREE.Mesh(new THREE.BoxGeometry(1.4, 3.2, 0.9), fridgeBodyMat);
+fridgeBody.position.set(0, 1.6, 0);
+fridgeBody.castShadow = true;
+fridgeBody.receiveShadow = true;
+fridgeGroup.add(fridgeBody);
+
+// Top freezer compartment back
+const fridgeTopBack = new THREE.Mesh(
+  new THREE.BoxGeometry(1.38, 0.98, 0.88),
+  new THREE.MeshStandardMaterial({ color: 0xe0e8f0, roughness: 0.5 })
+);
+fridgeTopBack.position.set(0, 2.71, 0);
+fridgeGroup.add(fridgeTopBack);
+
+// Bottom fridge compartment back  
+const fridgeBotBack = new THREE.Mesh(
+  new THREE.BoxGeometry(1.38, 1.98, 0.88),
+  new THREE.MeshStandardMaterial({ color: 0xe8f0e0, roughness: 0.5 })
+);
+fridgeBotBack.position.set(0, 1.21, 0);
+fridgeGroup.add(fridgeBotBack);
+
+// ── DOORS ──
+const doorMat = new THREE.ShaderMaterial({
+  uniforms: { lightPos: { value: lightPos }, baseColor: { value: new THREE.Vector3(0.93, 0.95, 0.97) } },
+  vertexShader: metalVertexShader,
+  fragmentShader: metalFragmentShader
+});
+const labelMat = new THREE.MeshBasicMaterial({ map: fridgeLabelTex });
+
+// Top freezer door (pivot left edge at x = -0.7)
+const topDoorGroup = new THREE.Group();
+topDoorGroup.position.set(-0.7, 2.71, 0.46);
+fridgeGroup.add(topDoorGroup);
+
+const topDoor = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 0.06), doorMat);
+topDoor.position.set(0.7, 0, 0);
+topDoorGroup.add(topDoor);
+
+// Label on top door
+const topLabel = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.5), labelMat);
+topLabel.position.set(0.7, 0, 0.035);
+topDoorGroup.add(topLabel);
+
+// Top door handle
+const handleMat = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.9, roughness: 0.2 });
+const topHandle = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.7, 8), handleMat);
+topHandle.position.set(1.28, 0, 0.06);
+topHandle.rotation.z = Math.PI / 2;
+topDoorGroup.add(topHandle);
+
+// Bottom fridge door (pivot left edge)
+const botDoorGroup = new THREE.Group();
+botDoorGroup.position.set(-0.7, 1.21, 0.46);
+fridgeGroup.add(botDoorGroup);
+
+const botDoor = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.0, 0.06), doorMat);
+botDoor.position.set(0.7, 0, 0);
+botDoorGroup.add(botDoor);
+
+const botLabel = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 1.2), labelMat);
+botLabel.position.set(0.7, 0, 0.035);
+botDoorGroup.add(botLabel);
+
+const botHandle = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.7, 8), handleMat);
+botHandle.position.set(1.28, 0, 0.06);
+botHandle.rotation.z = Math.PI / 2;
+botDoorGroup.add(botHandle);
+
+// Door separator strip
+const sepMat = new THREE.MeshStandardMaterial({ color: 0x666666 });
+const separator = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.04, 0.06), sepMat);
+separator.position.set(0, 2.21, 0.46);
+fridgeGroup.add(separator);
+
+// Fridge legs
+[-0.55, 0.55].forEach(x => {
+  const leg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.05, 0.08),
+    new THREE.MeshStandardMaterial({ color: 0x444444 }));
+  leg.position.set(x, 0.025, 0.3);
+  fridgeGroup.add(leg);
+});
+
+// Door open state
+let fridgeDoorOpen = false;
+let doorTargetAngle = 0;
+let doorCurrentAngle = 0;
+
+// ─────────────────────────────────────────────
+//  STOVE
+// ─────────────────────────────────────────────
+const stoveGroup = new THREE.Group();
+stoveGroup.position.set(1.5, 0, -4.1);
+scene.add(stoveGroup);
+
+const stoveSurface = new THREE.ShaderMaterial({
+  uniforms: { lightPos: { value: lightPos }, time: { value: 0 } },
+  vertexShader: stoveVertexShader,
+  fragmentShader: stoveFragmentShader
+});
+
+const stovePanelMat = new THREE.MeshStandardMaterial({ map: stovePanelTex, roughness: 0.6 });
+
+// Stove body
+const stoveBody = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.8, 0.9), stovePanelMat);
+stoveBody.position.set(0, 0.9, 0);
+stoveBody.castShadow = true;
+stoveBody.receiveShadow = true;
+stoveGroup.add(stoveBody);
+
+// Stove top surface (with shader)
+const stoveTop = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.06, 0.9), stoveSurface);
+stoveTop.position.set(0, 1.83, 0);
+stoveTop.castShadow = true;
+stoveGroup.add(stoveTop);
+
+// Backsplash
+const backSplash = new THREE.Mesh(
+  new THREE.BoxGeometry(1.6, 0.5, 0.05),
+  new THREE.ShaderMaterial({
+    uniforms: { lightPos: { value: lightPos }, baseColor: { value: new THREE.Vector3(0.7, 0.7, 0.75) } },
+    vertexShader: metalVertexShader, fragmentShader: metalFragmentShader
+  })
+);
+backSplash.position.set(0, 2.1, -0.425);
+stoveGroup.add(backSplash);
+
+// Knobs row
+const knobMat = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.7, roughness: 0.3 });
+[-0.5, -0.17, 0.17, 0.5].forEach(x => {
+  const knob = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.06, 0.08, 12), knobMat);
+  knob.position.set(x, 1.84, 0.38);
+  knob.rotation.x = Math.PI / 2;
+  stoveGroup.add(knob);
+  const marker = new THREE.Mesh(
+    new THREE.BoxGeometry(0.015, 0.06, 0.015),
+    new THREE.MeshBasicMaterial({ color: 0xff6600 })
+  );
+  marker.position.set(x, 1.86, 0.38);
+  stoveGroup.add(marker);
+});
+
+// Burner rings (visual, raised)
+const burnerMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
+const burnerPositions = [[-0.37, 1.875, -0.17], [0.37, 1.875, -0.17],
+                          [-0.37, 1.875, 0.17], [0.37, 1.875, 0.17]];
+burnerPositions.forEach(([bx, by, bz]) => {
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.14, 0.018, 6, 20), burnerMat);
+  ring.rotation.x = Math.PI / 2;
+  ring.position.set(bx, by, bz);
+  stoveGroup.add(ring);
+  const innerRing = new THREE.Mesh(new THREE.TorusGeometry(0.08, 0.012, 6, 16), burnerMat);
+  innerRing.rotation.x = Math.PI / 2;
+  innerRing.position.set(bx, by, bz);
+  stoveGroup.add(innerRing);
+});
+
+// Oven door handle
+const ovenHandleGeo = new THREE.CylinderGeometry(0.025, 0.025, 1.3, 8);
+const ovenHandle = new THREE.Mesh(ovenHandleGeo, handleMat);
+ovenHandle.rotation.z = Math.PI / 2;
+ovenHandle.position.set(0, 0.7, 0.47);
+stoveGroup.add(ovenHandle);
+
+// Oven window
+const ovenWindowMat = new THREE.MeshStandardMaterial({
+  color: 0x111122, transparent: true, opacity: 0.8,
+  roughness: 0.1, metalness: 0.1
+});
+const ovenWindow = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.4), ovenWindowMat);
+ovenWindow.position.set(0, 0.55, 0.456);
+stoveGroup.add(ovenWindow);
+
+// ─────────────────────────────────────────────
+//  STEAM PARTICLE SYSTEM (Animation)
+// ─────────────────────────────────────────────
+const STEAM_COUNT = 180;
+const steamGeometry = new THREE.BufferGeometry();
+const steamPositions = new Float32Array(STEAM_COUNT * 3);
+const steamSizes = new Float32Array(STEAM_COUNT);
+const steamAlphas = new Float32Array(STEAM_COUNT);
+const steamVelocities = [];
+const steamLifetimes = [];
+const steamMaxLife = [];
+
+function randomSteamBurner() {
+  const b = burnerPositions[Math.floor(Math.random() * 4)];
+  return {
+    x: b[0] + stoveGroup.position.x + (Math.random() - 0.5) * 0.05,
+    y: b[1] + stoveGroup.position.y + 0.05,
+    z: b[2] + stoveGroup.position.z + (Math.random() - 0.5) * 0.05
+  };
+}
+
+for (let i = 0; i < STEAM_COUNT; i++) {
+  const pos = randomSteamBurner();
+  steamPositions[i * 3] = pos.x;
+  steamPositions[i * 3 + 1] = pos.y;
+  steamPositions[i * 3 + 2] = pos.z;
+  const life = Math.random();
+  steamLifetimes.push(life);
+  steamMaxLife.push(1.5 + Math.random() * 1.5);
+  steamSizes[i] = 0.3 + Math.random() * 0.5;
+  steamAlphas[i] = 0.0;
+  steamVelocities.push({
+    x: (Math.random() - 0.5) * 0.008,
+    y: 0.012 + Math.random() * 0.01,
+    z: (Math.random() - 0.5) * 0.008
+  });
+}
+
+steamGeometry.setAttribute('position', new THREE.BufferAttribute(steamPositions, 3));
+steamGeometry.setAttribute('aSize', new THREE.BufferAttribute(steamSizes, 1));
+steamGeometry.setAttribute('aAlpha', new THREE.BufferAttribute(steamAlphas, 1));
+
+const steamMaterial = new THREE.ShaderMaterial({
+  uniforms: { time: { value: 0 } },
+  vertexShader: steamVertexShader,
+  fragmentShader: steamFragmentShader,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const steamParticles = new THREE.Points(steamGeometry, steamMaterial);
+scene.add(steamParticles);
+
+// ─────────────────────────────────────────────
+//  ADDITIONAL KITCHEN PROPS
+// ─────────────────────────────────────────────
+
+// Sink
+const sinkBaseMat = new THREE.ShaderMaterial({
+  uniforms: { lightPos: { value: lightPos }, baseColor: { value: new THREE.Vector3(0.82, 0.84, 0.86) } },
+  vertexShader: metalVertexShader, fragmentShader: metalFragmentShader
+});
+const sinkBase = makeBox(0.9, 0.06, 0.7, sinkBaseMat, 3.2, 1.06, -4.5);
+const sinkBowl = new THREE.Mesh(
+  new THREE.BoxGeometry(0.7, 0.25, 0.55),
+  new THREE.MeshStandardMaterial({ color: 0x8899aa, roughness: 0.3, side: THREE.BackSide })
+);
+sinkBowl.position.set(3.2, 0.94, -4.5);
+scene.add(sinkBowl);
+
+// Faucet
+const faucetMat = new THREE.MeshStandardMaterial({ color: 0x999999, metalness: 0.9, roughness: 0.15 });
+const faucetBase = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.3, 10), faucetMat);
+faucetBase.position.set(3.2, 1.25, -4.75);
+scene.add(faucetBase);
+const faucetArm = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.5, 8), faucetMat);
+faucetArm.rotation.z = Math.PI / 2;
+faucetArm.position.set(3.2, 1.42, -4.6);
+scene.add(faucetArm);
+const faucetNozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.025, 0.1, 8), faucetMat);
+faucetNozzle.position.set(3.2, 1.39, -4.38);
+scene.add(faucetNozzle);
+
+// Hanging light over counter
+const lightFixtureMat = new THREE.MeshStandardMaterial({ color: 0xffee88, emissive: 0xffcc44, emissiveIntensity: 0.5 });
+const lightBulb = new THREE.Mesh(new THREE.SphereGeometry(0.12, 12, 12), lightFixtureMat);
+lightBulb.position.set(0, 3.6, -3.5);
+scene.add(lightBulb);
+const cableGeo = new THREE.CylinderGeometry(0.008, 0.008, 1.4, 6);
+const cableMesh = new THREE.Mesh(cableGeo, new THREE.MeshBasicMaterial({ color: 0x222222 }));
+cableMesh.position.set(0, 4.3, -3.5);
+scene.add(cableMesh);
+
+// Pot on stove
+const potMat = new THREE.MeshStandardMaterial({ color: 0x222233, roughness: 0.3, metalness: 0.8 });
+const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.15, 0.22, 20), potMat);
+pot.position.set(-0.37 + stoveGroup.position.x, 1.96 + stoveGroup.position.y, -0.17 + stoveGroup.position.z);
+scene.add(pot);
+const potHandle = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.3, 6), potMat);
+potHandle.rotation.z = Math.PI / 2;
+potHandle.position.set(-0.37 + stoveGroup.position.x - 0.27, 2.0 + stoveGroup.position.y, -0.17 + stoveGroup.position.z);
+scene.add(potHandle);
+const lidMat = new THREE.MeshStandardMaterial({ color: 0x334455, roughness: 0.4, metalness: 0.5 });
+const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.17, 0.04, 20), lidMat);
+lid.position.set(-0.37 + stoveGroup.position.x, 2.09 + stoveGroup.position.y, -0.17 + stoveGroup.position.z);
+scene.add(lid);
+
+// ─────────────────────────────────────────────
+//  AESTHETIC FEATURE 1: ANIMATED WALL CLOCK
+// ─────────────────────────────────────────────
+const clockCanvas = document.createElement('canvas');
+clockCanvas.width = 512; clockCanvas.height = 512;
+const clockCtx = clockCanvas.getContext('2d');
+const clockTex = new THREE.CanvasTexture(clockCanvas);
+
+function drawClock() {
+  const S = 512;
+  const cx = S / 2, cy = S / 2, r = S / 2 - 16;
+  clockCtx.clearRect(0, 0, S, S);
+
+  // Outer shadow glow
+  clockCtx.save();
+  clockCtx.shadowColor = 'rgba(255,220,120,0.55)';
+  clockCtx.shadowBlur = 28;
+
+  // Face gradient - bright white for maximum visibility
+  const grad = clockCtx.createRadialGradient(cx - 30, cy - 30, 10, cx, cy, r);
+  grad.addColorStop(0, '#ffffff');
+  grad.addColorStop(0.75, '#f8f4e8');
+  grad.addColorStop(1, '#ede0c0');
+  clockCtx.beginPath(); clockCtx.arc(cx, cy, r, 0, Math.PI * 2);
+  clockCtx.fillStyle = grad; clockCtx.fill();
+  clockCtx.restore();
+
+  // Outer ring - very dark for contrast
+  clockCtx.beginPath(); clockCtx.arc(cx, cy, r, 0, Math.PI * 2);
+  clockCtx.strokeStyle = '#1a0800'; clockCtx.lineWidth = 18; clockCtx.stroke();
+
+  // Inner decorative ring - gold
+  clockCtx.beginPath(); clockCtx.arc(cx, cy, r - 12, 0, Math.PI * 2);
+  clockCtx.strokeStyle = '#b8860b'; clockCtx.lineWidth = 4; clockCtx.stroke();
+
+  // Tick marks
+  for (let i = 0; i < 60; i++) {
+    const a = (i / 60) * Math.PI * 2 - Math.PI / 2;
+    const isHour = i % 5 === 0;
+    const isQuarter = i % 15 === 0;
+    const tickLen = isQuarter ? 28 : isHour ? 20 : 10;
+    const tickW   = isQuarter ? 5  : isHour ? 3.5 : 1.5;
+    const inner   = r - 14 - tickLen;
+    clockCtx.beginPath();
+    clockCtx.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+    clockCtx.lineTo(cx + Math.cos(a) * (r - 14), cy + Math.sin(a) * (r - 14));
+    clockCtx.strokeStyle = isHour ? '#2a1400' : '#aaa';
+    clockCtx.lineWidth = tickW;
+    clockCtx.lineCap = 'round';
+    clockCtx.stroke();
+  }
+
+  // Hour numerals - jet black, large
+  const numR = r - 58;
+  clockCtx.textAlign = 'center';
+  clockCtx.textBaseline = 'middle';
+  clockCtx.fillStyle = '#000000';
+  for (let h = 1; h <= 12; h++) {
+    const a = (h / 12) * Math.PI * 2 - Math.PI / 2;
+    const nx = cx + Math.cos(a) * numR;
+    const ny = cy + Math.sin(a) * numR;
+    const isQuarter = (h % 3 === 0);
+    clockCtx.font = isQuarter
+      ? 'bold 52px Georgia, serif'
+      : 'bold 40px Georgia, serif';
+    clockCtx.fillText(String(h), nx, ny);
+  }
+
+  // ── Real-time hands ──
+  const now = new Date();
+  const sec = now.getSeconds() + now.getMilliseconds() / 1000;
+  const min = now.getMinutes() + sec / 60;
+  const hr  = (now.getHours() % 12) + min / 60;
+
+  function hand(angle, len, tailLen, w, color, shadow) {
+    const a = angle * Math.PI * 2 - Math.PI / 2;
+    clockCtx.save();
+    if (shadow) {
+      clockCtx.shadowColor = 'rgba(0,0,0,0.35)';
+      clockCtx.shadowBlur = 6;
+      clockCtx.shadowOffsetX = 3;
+      clockCtx.shadowOffsetY = 3;
+    }
+    clockCtx.beginPath();
+    clockCtx.moveTo(cx - Math.cos(a) * tailLen, cy - Math.sin(a) * tailLen);
+    clockCtx.lineTo(cx + Math.cos(a) * len, cy + Math.sin(a) * len);
+    clockCtx.strokeStyle = color;
+    clockCtx.lineWidth = w;
+    clockCtx.lineCap = 'round';
+    clockCtx.stroke();
+    clockCtx.restore();
+  }
+
+  // Hour hand - very thick, jet black
+  hand(hr / 12,  r * 0.50, 18, 18, '#000000', true);
+  // Minute hand - thick, jet black
+  hand(min / 60, r * 0.70, 22, 11, '#000000', true);
+  // Second hand - red, clearly visible
+  hand(sec / 60, r * 0.78, 28, 4,  '#ee0000', false);
+  // Second hand tail accent
+  const sa = (sec / 60) * Math.PI * 2 - Math.PI / 2;
+  clockCtx.beginPath();
+  clockCtx.arc(cx - Math.cos(sa) * 26, cy - Math.sin(sa) * 26, 6, 0, Math.PI * 2);
+  clockCtx.fillStyle = '#dd1100'; clockCtx.fill();
+
+  // Center boss
+  clockCtx.beginPath(); clockCtx.arc(cx, cy, 13, 0, Math.PI * 2);
+  clockCtx.fillStyle = '#2a1400'; clockCtx.fill();
+  clockCtx.beginPath(); clockCtx.arc(cx, cy, 7, 0, Math.PI * 2);
+  clockCtx.fillStyle = '#dd1100'; clockCtx.fill();
+  clockCtx.beginPath(); clockCtx.arc(cx, cy, 3, 0, Math.PI * 2);
+  clockCtx.fillStyle = '#fff'; clockCtx.fill();
+}
+drawClock();
+
+// MeshBasicMaterial = unaffected by scene lighting, always fully bright
+const clockFaceMat = new THREE.MeshBasicMaterial({ map: clockTex });
+const clockFace = new THREE.Mesh(new THREE.CircleGeometry(0.68, 64), clockFaceMat);
+// Right wall: x=6.92, facing inward (rotation.y = -PI/2)
+clockFace.position.set(6.92, 3.4, -1.5);
+clockFace.rotation.y = -Math.PI / 2;
+scene.add(clockFace);
+
+// Thick wooden clock rim
+const clockRim = new THREE.Mesh(
+  new THREE.TorusGeometry(0.70, 0.08, 14, 64),
+  new THREE.MeshStandardMaterial({ color: 0x3a2008, roughness: 0.55, metalness: 0.15 })
+);
+clockRim.position.copy(clockFace.position);
+clockRim.rotation.y = -Math.PI / 2;
+scene.add(clockRim);
+
+// Dedicated warm point light to illuminate the clock area
+const clockLight = new THREE.PointLight(0xffffff, 1.5, 4.0);
+clockLight.position.set(5.8, 3.4, -1.5);
+scene.add(clockLight);
+
+// ─────────────────────────────────────────────
+//  AESTHETIC FEATURE 2: KITCHEN WINDOW + SKY
+// ─────────────────────────────────────────────
+// Window frame on the right wall
+const frameMat = new THREE.MeshStandardMaterial({ color: 0xe8dcc8, roughness: 0.6 });
+// Outer frame
+const winFrame = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.6, 1.4), frameMat);
+winFrame.position.set(6.96, 3.0, 1.5);
+winFrame.rotation.y = Math.PI / 2;
+scene.add(winFrame);
+const winFrameH = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.4, 0.1), frameMat);
+// Top/bottom bars
+[-0.75, 0.75].forEach(dy => {
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 1.4), frameMat);
+  bar.position.set(6.96, 3.0 + dy, 1.5);
+  scene.add(bar);
+});
+[-0.65, 0.65].forEach(dz => {
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.6, 0.1), frameMat);
+  bar.position.set(6.96, 3.0, 1.5 + dz);
+  scene.add(bar);
+});
+// Cross bar
+const crossH = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 1.4), frameMat);
+crossH.position.set(6.96, 3.0, 1.5); scene.add(crossH);
+const crossV = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.6, 0.07), frameMat);
+crossV.position.set(6.96, 3.0, 1.5); scene.add(crossV);
+
+// Sky canvas - animated gradient
+const skyCanvas = document.createElement('canvas');
+skyCanvas.width = 256; skyCanvas.height = 256;
+const skyCtx = skyCanvas.getContext('2d');
+const skyTex = new THREE.CanvasTexture(skyCanvas);
+
+function drawSky(t) {
+  // Gentle day/night cycle over 60s
+  const cycle = (Math.sin(t * 0.04) + 1) / 2;
+  const r1 = Math.round(135 + cycle * 80), g1 = Math.round(180 + cycle * 50), b1 = Math.round(220 + cycle * 35);
+  const r2 = Math.round(200 + cycle * 55), g2 = Math.round(230 + cycle * 25), b2 = Math.round(240 + cycle * 15);
+  const skyGrad = skyCtx.createLinearGradient(0, 0, 0, 256);
+  skyGrad.addColorStop(0, `rgb(${r1},${g1},${b1})`);
+  skyGrad.addColorStop(1, `rgb(${r2},${g2},${b2})`);
+  skyCtx.fillStyle = skyGrad; skyCtx.fillRect(0, 0, 256, 256);
+  // Sun / moon
+  const sunY = 60 + (1 - cycle) * 80;
+  const sunColor = cycle > 0.5 ? `rgba(255,230,80,${0.5 + cycle * 0.5})` : `rgba(220,220,240,0.8)`;
+  skyCtx.beginPath(); skyCtx.arc(180, sunY, 22, 0, Math.PI * 2);
+  skyCtx.fillStyle = sunColor; skyCtx.fill();
+  // Clouds
+  function cloud(x, y, s) {
+    skyCtx.fillStyle = 'rgba(255,255,255,0.75)';
+    [[0,0,28],[22,5,20],[-22,5,20],[0,12,22]].forEach(([dx,dy,r]) => {
+      skyCtx.beginPath(); skyCtx.arc(x+dx*s, y+dy*s, r*s, 0, Math.PI*2); skyCtx.fill();
+    });
+  }
+  cloud(60, 90, 0.7); cloud(150, 140, 0.5);
+}
+drawSky(0);
+
+const skyMat = new THREE.MeshBasicMaterial({ map: skyTex });
+const skyPane = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 1.45), skyMat);
+skyPane.position.set(6.92, 3.0, 1.5);
+skyPane.rotation.y = Math.PI / 2;
+scene.add(skyPane);
+
+// Subtle window glow light
+const windowLight = new THREE.PointLight(0xb0d8ff, 0.5, 8);
+windowLight.position.set(5.5, 3.0, 1.5);
+scene.add(windowLight);
+
+// ─────────────────────────────────────────────
+//  FEATURE: SOAP BUBBLES FROM SINK
+// ─────────────────────────────────────────────
+const BUBBLE_COUNT = 28;
+const bubbleGeo = new THREE.BufferGeometry();
+const bubblePosArr = new Float32Array(BUBBLE_COUNT * 3);
+const bubbleSizes = new Float32Array(BUBBLE_COUNT);
+const bubbleAlphas = new Float32Array(BUBBLE_COUNT);
+const bubbleLife = [], bubbleMaxLife = [], bubbleVel = [];
+const SINK_X = 3.2, SINK_Y = 1.12, SINK_Z = -4.5;
+
+function resetBubble(i) {
+  bubblePosArr[i*3]   = SINK_X + (Math.random()-0.5)*0.3;
+  bubblePosArr[i*3+1] = SINK_Y;
+  bubblePosArr[i*3+2] = SINK_Z + (Math.random()-0.5)*0.2;
+  bubbleLife[i] = Math.random() * bubbleMaxLife[i];
+  bubbleVel[i]  = { x:(Math.random()-0.5)*0.003, y:0.008+Math.random()*0.006, z:(Math.random()-0.5)*0.002 };
+}
+for (let i = 0; i < BUBBLE_COUNT; i++) {
+  bubbleMaxLife.push(2.5 + Math.random() * 2.0);
+  bubbleLife.push(0); bubbleVel.push({x:0,y:0,z:0});
+  bubbleSizes[i] = 0; bubbleAlphas[i] = 0;
+  resetBubble(i);
+}
+bubbleGeo.setAttribute('position', new THREE.BufferAttribute(bubblePosArr, 3));
+bubbleGeo.setAttribute('aSize',    new THREE.BufferAttribute(bubbleSizes, 1));
+bubbleGeo.setAttribute('aAlpha',   new THREE.BufferAttribute(bubbleAlphas, 1));
+
+const bubbleMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute float aSize; attribute float aAlpha; varying float vAlpha;
+    void main() {
+      vAlpha = aAlpha;
+      vec4 mv = modelViewMatrix * vec4(position,1.0);
+      gl_PointSize = aSize * (280.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vAlpha;
+    void main() {
+      vec2 uv = gl_PointCoord - 0.5; float d = length(uv);
+      if (d > 0.5) discard;
+      float rim = smoothstep(0.3, 0.5, d);
+      vec3 col = mix(vec3(0.8,0.95,1.0), vec3(0.6,0.85,1.0), d*2.0);
+      col += vec3(0.4,0.2,0.6) * rim * 0.6;
+      col += vec3(0.0,0.5,0.3) * smoothstep(0.1,0.0,abs(d-0.25)) * 0.4;
+      float alpha = rim * vAlpha * 0.75 + (1.0-d*1.8)*0.1*vAlpha;
+      gl_FragColor = vec4(col, alpha);
+    }`,
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending
+});
+const bubbleParticles = new THREE.Points(bubbleGeo, bubbleMat);
+scene.add(bubbleParticles);
+
+function updateBubbles(dt, t) {
+  const pos = bubbleGeo.attributes.position;
+  const sizes = bubbleGeo.attributes.aSize;
+  const alphas = bubbleGeo.attributes.aAlpha;
+  for (let i = 0; i < BUBBLE_COUNT; i++) {
+    bubbleLife[i] += dt;
+    if (bubbleLife[i] >= bubbleMaxLife[i]) { resetBubble(i); bubbleLife[i] = 0; continue; }
+    const lr = bubbleLife[i] / bubbleMaxLife[i];
+    pos.array[i*3]   += bubbleVel[i].x + Math.sin(t*1.5+i*1.3)*0.0008;
+    pos.array[i*3+1] += bubbleVel[i].y * (1.0 - lr*0.3);
+    pos.array[i*3+2] += bubbleVel[i].z + Math.cos(t*1.2+i*0.9)*0.0005;
+    sizes.array[i]  = 0.25 + lr * 0.4;
+    alphas.array[i] = lr < 0.1 ? lr/0.1 : (lr > 0.85 ? (1.0-lr)/0.15 : 1.0);
+  }
+  pos.needsUpdate = true; sizes.needsUpdate = true; alphas.needsUpdate = true;
+}
+
+// ─────────────────────────────────────────────
+//  FEATURE: CLICKABLE LIGHT SWITCH
+// ─────────────────────────────────────────────
+let lightsOn = true;
+
+// Switch plate on back wall
+const switchPlate = new THREE.Mesh(
+  new THREE.BoxGeometry(0.02, 0.1, 0.07),
+  new THREE.MeshStandardMaterial({ color: 0xf0ece4, roughness: 0.5 })
+);
+switchPlate.position.set(-4.0, 2.0, -4.94);
+scene.add(switchPlate);
+
+const switchToggle = new THREE.Mesh(
+  new THREE.BoxGeometry(0.025, 0.045, 0.025),
+  new THREE.MeshStandardMaterial({ color: 0xddddcc, roughness: 0.4 })
+);
+switchToggle.position.set(-4.0, 2.01, -4.92);
+scene.add(switchToggle);
+
+// Ceiling lamp fixture
+const lampHousing = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.25, 0.3, 0.12, 16),
+  new THREE.MeshStandardMaterial({ color: 0xddddcc, roughness: 0.5 })
+);
+lampHousing.position.set(0, 4.88, 0);
+scene.add(lampHousing);
+
+const lampGlowMat = new THREE.MeshBasicMaterial({ color: 0xfffde0 });
+const lampGlow = new THREE.Mesh(new THREE.CircleGeometry(0.22, 16), lampGlowMat);
+lampGlow.rotation.x = Math.PI / 2;
+lampGlow.position.set(0, 4.82, 0);
+scene.add(lampGlow);
+
+function toggleLights() {
+  lightsOn = !lightsOn;
+  kitchenLight.intensity = lightsOn ? 0.78 : 0;
+  lampGlowMat.color.setHex(lightsOn ? 0xfffde0 : 0x111108);
+  switchToggle.position.y = lightsOn ? 2.01 : 1.985;
+  showStatus(lightsOn ? '💡 Lights: ON' : '🌑 Lights: OFF');
+}
+
+// ─────────────────────────────────────────────
+//  RAYCASTER & MOUSE CLICK
+// ─────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const statusEl = document.getElementById('status');
+
+let statusTimeout;
+function showStatus(msg) {
+  statusEl.textContent = msg;
+  statusEl.style.opacity = '1';
+  clearTimeout(statusTimeout);
+  statusTimeout = setTimeout(() => { statusEl.style.opacity = '0'; }, 2500);
+}
+
+// Clickable objects for fridge door
+const clickables = [topDoor, botDoor, topLabel, botLabel, topHandle, botHandle];
+const switchClickables = [switchPlate, switchToggle];
+
+renderer.domElement.addEventListener('click', (e) => {
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  const fridgeHits = raycaster.intersectObjects(clickables, true);
+  if (fridgeHits.length > 0) {
+    fridgeDoorOpen = !fridgeDoorOpen;
+    doorTargetAngle = fridgeDoorOpen ? -Math.PI * 0.7 : 0;
+    showStatus(fridgeDoorOpen ? '🧊 Refrigerator Door: OPEN' : '❄️ Refrigerator Door: CLOSED');
+    return;
+  }
+  const swHits = raycaster.intersectObjects(switchClickables, true);
+  if (swHits.length > 0) toggleLights();
+});
+
+// ─────────────────────────────────────────────
+//  KEYBOARD & CAMERA MOVEMENT
+// ─────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === 'l' || e.key === 'L') toggleLights();
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+let camYaw = 0;
+let camPitch = -0.15;
+const CAM_SPEED = 0.06;
+const ROT_SPEED = 0.025;
+
+// Camera bounds
+const CAM_BOUNDS = { minX: -6, maxX: 6, minY: 0.5, maxY: 4.5, minZ: -4.5, maxZ: 7 };
+
+function updateCamera() {
+  // Rotation
+  if (keys['ArrowLeft'])  camYaw += ROT_SPEED;
+  if (keys['ArrowRight']) camYaw -= ROT_SPEED;
+  if (keys['ArrowUp'])    camPitch = Math.min(0.8, camPitch + ROT_SPEED);
+  if (keys['ArrowDown'])  camPitch = Math.max(-0.8, camPitch - ROT_SPEED);
+
+  // Movement
+  const forward = new THREE.Vector3(
+    -Math.sin(camYaw) * Math.cos(camPitch),
+    Math.sin(camPitch),
+    -Math.cos(camYaw) * Math.cos(camPitch)
+  );
+  const right = new THREE.Vector3(Math.cos(camYaw), 0, -Math.sin(camYaw));
+
+  if (keys['w'] || keys['W']) camera.position.addScaledVector(forward, CAM_SPEED);
+  if (keys['s'] || keys['S']) camera.position.addScaledVector(forward, -CAM_SPEED);
+  if (keys['a'] || keys['A']) camera.position.addScaledVector(right, -CAM_SPEED);
+  if (keys['d'] || keys['D']) camera.position.addScaledVector(right, CAM_SPEED);
+  if (keys['q'] || keys['Q']) camera.position.y += CAM_SPEED;
+  if (keys['e'] || keys['E']) camera.position.y -= CAM_SPEED;
+
+  // Clamp position
+  camera.position.x = Math.max(CAM_BOUNDS.minX, Math.min(CAM_BOUNDS.maxX, camera.position.x));
+  camera.position.y = Math.max(CAM_BOUNDS.minY, Math.min(CAM_BOUNDS.maxY, camera.position.y));
+  camera.position.z = Math.max(CAM_BOUNDS.minZ, Math.min(CAM_BOUNDS.maxZ, camera.position.z));
+
+  // Apply look direction
+  const target = camera.position.clone().add(forward);
+  camera.lookAt(target);
+}
+
+// ─────────────────────────────────────────────
+//  ANIMATION LOOP
+// ─────────────────────────────────────────────
+const clock = new THREE.Clock();
+
+function updateSteam(dt, t) {
+  const pos = steamGeometry.attributes.position;
+  const sizes = steamGeometry.attributes.aSize;
+  const alphas = steamGeometry.attributes.aAlpha;
+
+  for (let i = 0; i < STEAM_COUNT; i++) {
+    steamLifetimes[i] += dt;
+
+    if (steamLifetimes[i] >= steamMaxLife[i]) {
+      // Reset particle
+      steamLifetimes[i] = 0;
+      steamMaxLife[i] = 1.5 + Math.random() * 1.5;
+      const src = randomSteamBurner();
+      pos.array[i * 3] = src.x;
+      pos.array[i * 3 + 1] = src.y;
+      pos.array[i * 3 + 2] = src.z;
+      steamVelocities[i].x = (Math.random() - 0.5) * 0.008;
+      steamVelocities[i].y = 0.012 + Math.random() * 0.01;
+      steamVelocities[i].z = (Math.random() - 0.5) * 0.008;
+      continue;
+    }
+
+    const lifeRatio = steamLifetimes[i] / steamMaxLife[i];
+
+    // Drift upward with subtle horizontal wiggle
+    pos.array[i * 3]     += steamVelocities[i].x + Math.sin(t * 2 + i * 0.7) * 0.001;
+    pos.array[i * 3 + 1] += steamVelocities[i].y;
+    pos.array[i * 3 + 2] += steamVelocities[i].z;
+
+    // Expand and fade
+    sizes.array[i] = (0.3 + lifeRatio * 0.9) * (1.0 + Math.sin(t * 3 + i) * 0.1);
+    // Fade in then out
+    alphas.array[i] = lifeRatio < 0.2
+      ? lifeRatio / 0.2
+      : 1.0 - (lifeRatio - 0.2) / 0.8;
+  }
+
+  pos.needsUpdate = true;
+  sizes.needsUpdate = true;
+  alphas.needsUpdate = true;
+}
+
+function updateDoor(dt) {
+  const diff = doorTargetAngle - doorCurrentAngle;
+  doorCurrentAngle += diff * Math.min(dt * 4, 0.3);
+  topDoorGroup.rotation.y = doorCurrentAngle;
+  botDoorGroup.rotation.y = doorCurrentAngle;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  const t = clock.getElapsedTime();
+
+  updateCamera();
+  updateSteam(dt, t);
+  updateDoor(dt);
+  updateBubbles(dt, t);
+
+  // Update shader time uniforms
+  woodMat.uniforms.time.value = t;
+  steamMaterial.uniforms.time.value = t;
+  stoveSurface.uniforms.time.value = t;
+
+  // Subtle light flicker (only when on)
+  if (lightsOn) kitchenLight.intensity = 0.78 + Math.sin(t * 7.3) * 0.03;
+
+  // Lid bobbles on pot
+  lid.position.y = (1.96 + 0.13 + stoveGroup.position.y) + Math.sin(t * 4.2) * 0.004;
+  lid.rotation.y = t * 0.3;
+
+  // Update animated wall clock (every ~0.5s is enough)
+  drawClock();
+  clockTex.needsUpdate = true;
+
+  // Update animated sky window
+  drawSky(t);
+  skyTex.needsUpdate = true;
+  // Window light shifts with sky cycle
+  const skyCycle = (Math.sin(t * 0.04) + 1) / 2;
+  windowLight.intensity = 0.3 + skyCycle * 0.5;
+
+  renderer.render(scene, camera);
+}
+
+// ─────────────────────────────────────────────
+//  RESIZE HANDLER
+// ─────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+animate();
+showStatus('Click the Refrigerator Door to Open / Close it');
+</script>
+</body>
+</html>
